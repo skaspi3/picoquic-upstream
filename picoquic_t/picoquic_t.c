@@ -117,6 +117,7 @@ static const picoquic_test_def_t test_table[] = {
     { "connection_id_parse", util_connection_id_parse_test },
     { "error_name", error_name_test },
     { "util_sprintf", util_sprintf_test },
+    { "util_addr_text", util_addr_text_test },
     { "util_debug_print", util_debug_print_test },
     { "util_debug_pop_stream", util_debug_pop_stream_test },
     { "util_uint8_to_str", util_uint8_to_str_test },
