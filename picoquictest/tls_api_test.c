@@ -4575,6 +4575,10 @@ int zero_rtt_test_one(zero_rtt_test_t * zrt)
                 ret = picoquic_ech_configure_quic_ctx(test_ctx->qclient, NULL, NULL);
             }
 
+            if (ret == 0 && (zrt->refuse_0rtt == 1 || (zrt->refuse_0rtt == 2 && i == 1))) {
+                picoquic_set_accept_0rtt(test_ctx->qserver, 0);
+            }
+
             if (ret == 0 && zrt->cipher_suite_id != 0 &&
                 (picoquic_set_cipher_suite(test_ctx->qclient, zrt->cipher_suite_id) != 0 ||
                     picoquic_set_cipher_suite(test_ctx->qserver, zrt->cipher_suite_id) != 0)) {
@@ -4635,8 +4639,8 @@ int zero_rtt_test_one(zero_rtt_test_t * zrt)
         if (ret == 0 && zrt->use_badcrypt == 0 && zrt->hardreset == 0 && zrt->change_params == 0) {
             int rtt_is_available = picoquic_is_0rtt_available(test_ctx->cnx_client);
 
-            if ((rtt_is_available && i == 0) ||
-                (!rtt_is_available && i != 0)) {
+            if (rtt_is_available != (i != 0 && zrt->refuse_0rtt != 1)) {
+                DBG_PRINTF("Zero RTT test, connection %d, 0-RTT available: %d.\n", i, rtt_is_available);
                 ret = -1;
             }
         }
@@ -4698,7 +4702,22 @@ int zero_rtt_test_one(zero_rtt_test_t * zrt)
 
         /* Verify that the 0RTT data was sent and acknowledged */
         if (ret == 0 && i == 1) {
-            if (zrt->use_badcrypt == 0 && zrt->hardreset == 0 && zrt->change_params == 0) {
+            if (zrt->refuse_0rtt) {
+                /* With a ticket issued before the server refused 0-RTT, the client tries 0-RTT */
+                if ((test_ctx->cnx_client->nb_zero_rtt_sent == 0) != (zrt->refuse_0rtt == 1) ||
+                    test_ctx->cnx_client->nb_zero_rtt_acked != 0 ||
+                    test_ctx->cnx_client->zero_rtt_data_accepted ||
+                    (test_ctx->cnx_server != NULL && test_ctx->cnx_server->nb_zero_rtt_received != 0) ||
+                    test_ctx->sum_data_received_at_server == 0) {
+                    DBG_PRINTF("Zero RTT refused test (mode %d), sent %d, acked %d, accepted %d, server received %d, data %d.\n",
+                        zrt->refuse_0rtt, (int)test_ctx->cnx_client->nb_zero_rtt_sent,
+                        (int)test_ctx->cnx_client->nb_zero_rtt_acked, (int)test_ctx->cnx_client->zero_rtt_data_accepted,
+                        (test_ctx->cnx_server == NULL) ? -1 : (int)test_ctx->cnx_server->nb_zero_rtt_received,
+                        test_ctx->sum_data_received_at_server);
+                    ret = -1;
+                }
+            }
+            else if (zrt->use_badcrypt == 0 && zrt->hardreset == 0 && zrt->change_params == 0) {
                 if (test_ctx->cnx_client->nb_zero_rtt_sent == 0) {
                     DBG_PRINTF("Zero RTT test (badcrypt: %d, hard: %d), no zero RTT sent.\n",
                         zrt->use_badcrypt, zrt->hardreset);
@@ -4946,6 +4965,29 @@ int zero_rtt_ech_test(void)
     zero_rtt_test_t zrt = { 0 };
     zrt.propose_ech = 1;
     return zero_rtt_test_one(&zrt);
+}
+
+/*
+* 0-RTT refused. Verify that when the server refuses 0-RTT, the session
+* still resumes, no 0-RTT data is accepted, and the data arrives in 1-RTT
+* packets. Test with a ticket issued after the server refused 0-RTT, and
+* with a ticket issued before.
+*/
+
+int zero_rtt_refused_test(void)
+{
+    int ret = 0;
+
+    for (int refuse_0rtt = 1; ret == 0 && refuse_0rtt <= 2; refuse_0rtt++) {
+        zero_rtt_test_t zrt = { 0 };
+        zrt.refuse_0rtt = refuse_0rtt;
+        ret = zero_rtt_test_one(&zrt);
+        if (ret != 0) {
+            DBG_PRINTF("Zero RTT refused test fails, mode %d.\n", refuse_0rtt);
+        }
+    }
+
+    return ret;
 }
 
 /*

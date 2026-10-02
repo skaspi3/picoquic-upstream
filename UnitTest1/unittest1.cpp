@@ -2054,6 +2054,13 @@ namespace UnitTest1
 
             Assert::AreEqual(ret, 0);
         }
+
+        TEST_METHOD(zero_rtt_refused)
+        {
+            int ret = zero_rtt_refused_test();
+
+            Assert::AreEqual(ret, 0);
+        }
 #if 0
         TEST_METHOD(zero_rtt_ech) {
             int ret = zero_rtt_ech_test();

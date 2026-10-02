@@ -3349,6 +3349,13 @@ void picoquic_tls_set_use_exporter(picoquic_quic_t* quic, int use_exporter) {
     ((ptls_context_t*)quic->tls_master_ctx)->use_exporter = use_exporter;
 }
 
+void picoquic_set_accept_0rtt(picoquic_quic_t* quic, int accept_0rtt)
+{
+    PICOQUIC_THREAD_CHECK(quic);
+    /* In QUIC, tickets that allow 0-RTT must set max_early_data_size to 0xFFFFFFFF (RFC 9001) */
+    ((ptls_context_t*)quic->tls_master_ctx)->max_early_data_size = (accept_0rtt) ? 0xFFFFFFFF : 0;
+}
+
 /* 
  * Create or verify a token. Tokens are tied to an IP address and a time of
  * issue, and come in two variations:

@@ -822,6 +822,14 @@ void picoquic_set_client_authentication(picoquic_quic_t* quic, int client_authen
 /* Set TLS exporter flag in the master TLS context */
 void picoquic_set_use_exporter(picoquic_quic_t* quic, int use_exporter);
 
+/* Server side 0-RTT policy, accepted by default. With accept_0rtt = 0,
+ * session tickets issued afterwards do not allow 0-RTT, and 0-RTT data
+ * offered with older tickets is rejected: the session still resumes, and
+ * the client sends that data again in 1-RTT packets. Applications that
+ * cannot tolerate replayed 0-RTT data should refuse it, as there is no
+ * anti-replay protection. */
+void picoquic_set_accept_0rtt(picoquic_quic_t* quic, int accept_0rtt);
+
 /* Export keying material from the TLS connection using the given exporter label */
 int picoquic_export_secret(picoquic_cnx_t *cnx, const char *label, uint8_t *out, size_t outlen);
 

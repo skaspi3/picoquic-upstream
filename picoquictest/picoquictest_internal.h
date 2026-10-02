@@ -433,6 +433,7 @@ typedef struct st_zero_rtt_test_t {
     int propose_ech;
     int change_params;
     int cipher_suite_id;
+    int refuse_0rtt; /* 1: both server instances refuse 0-RTT, 2: only the second one */
 } zero_rtt_test_t;
 
 int zero_rtt_test_one(zero_rtt_test_t* zrt);
