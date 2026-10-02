@@ -729,7 +729,7 @@ picoquic_packet_t* picoquic_dequeue_retransmit_packet(picoquic_cnx_t* cnx,
 
     /* Account for bytes in transit, for congestion control */
 
-    if (p->send_path != NULL && !p->is_ack_trap) {
+    if (p->send_path != NULL && !p->is_ack_trap && !PICOQUIC_IS_SENT_BEFORE_CC_RESET(p)) {
         if (p->send_path->bytes_in_transit > dequeued_length) {
             p->send_path->bytes_in_transit -= dequeued_length;
         }

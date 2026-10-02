@@ -1140,6 +1140,7 @@ typedef struct st_picoquic_path_t {
     uint64_t sum_rtt_estimate_in_period;
     uint64_t max_rtt_estimate_in_period;
     uint64_t min_rtt_estimate_in_period;
+    uint64_t cc_reset_time; /* The path moved to a new address: packets sent before no longer count for it */
 
 
     /* MTU */
@@ -1924,6 +1925,10 @@ void picoquic_seed_bandwidth(picoquic_cnx_t* cnx, uint64_t rtt_min, uint64_t cwi
 
 /* Management of timers, rtt, etc. */
 uint64_t picoquic_current_retransmit_timer(picoquic_cnx_t* cnx, picoquic_path_t* path_x);
+void picoquic_init_path_rtt(picoquic_path_t* path_x);
+/* RFC 9000 9.4: a packet sent before its path moved to a new address does not count for the
+ * congestion control, the RTT estimate or the bytes in transit of the path. */
+#define PICOQUIC_IS_SENT_BEFORE_CC_RESET(p) ((p)->send_path != NULL && (p)->send_time < (p)->send_path->cc_reset_time)
 
 /* Update the path RTT upon receiving an explict or implicit acknowledgement */
 void picoquic_update_path_rtt(picoquic_cnx_t* cnx, picoquic_path_t * old_path, int epoch,

@@ -1930,6 +1930,20 @@ namespace UnitTest1
             Assert::AreEqual(ret, 0);
         }
 
+        TEST_METHOD(nat_rebinding_cc_kept)
+        {
+            int ret = nat_rebinding_cc_kept_test();
+
+            Assert::AreEqual(ret, 0);
+        }
+
+        TEST_METHOD(migration_cc_reset)
+        {
+            int ret = migration_cc_reset_test();
+
+            Assert::AreEqual(ret, 0);
+        }
+
         TEST_METHOD(nat_rebinding_fast)
         {
             int ret = fast_nat_rebinding_test();

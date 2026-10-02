@@ -904,7 +904,7 @@ static void picoquic_count_and_notify_loss(
         cnx->nb_retransmission_total++;
     }
 
-    if (old_p->send_path != NULL) {
+    if (old_p->send_path != NULL && !PICOQUIC_IS_SENT_BEFORE_CC_RESET(old_p)) {
         old_p->send_path->nb_losses_found++;
         if (timer_based_retransmit == 0) {
             if (old_p->send_path->nb_loss_ranges_found == 0 ||

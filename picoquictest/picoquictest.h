@@ -203,6 +203,8 @@ int nat_rebinding_test(void);
 int nat_rebinding_loss_test(void);
 int nat_rebinding_zero_test(void);
 int nat_rebinding_latency_test(void);
+int nat_rebinding_cc_kept_test(void);
+int migration_cc_reset_test(void);
 int spinbit_test(void);
 int spinbit_random_test(void);
 int spinbit_randclient_test(void);

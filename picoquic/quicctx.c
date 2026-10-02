@@ -1931,10 +1931,7 @@ int picoquic_create_path(picoquic_cnx_t* cnx, uint64_t start_time, const struct 
 
             if (tuple != NULL) {
                 /* Initialize per path time measurement */
-                path_x->smoothed_rtt = PICOQUIC_INITIAL_RTT;
-                path_x->rtt_variant = 0;
-                path_x->retransmit_timer = PICOQUIC_INITIAL_RETRANSMIT_TIMER;
-                path_x->rtt_min = 0;
+                picoquic_init_path_rtt(path_x);
 
                 /* Initialize per path congestion control state */
                 path_x->cwin = PICOQUIC_CWIN_INITIAL;

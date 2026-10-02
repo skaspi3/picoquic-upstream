@@ -6757,6 +6757,140 @@ int nat_rebinding_latency_test(void)
     return nat_rebinding_test_one(loss_mask, 0, 100000);
 }
 
+/* RFC 9000 9.4: once a peer's new IP address is validated, the congestion controller and the
+ * RTT estimator of the path restart from their initial values, and packets sent on the old
+ * path no longer count for the new one; a change of port only (NAT rebinding) keeps them.
+ * A first download grows the server's window, then the client moves behind a NAT -- new IP
+ * address, or new port -- onto a longer path. Packets the server still sends to the old
+ * address are lost: with a new IP, those losses must not shrink the new path's window.
+ */
+static test_api_stream_desc_t test_scenario_migration_cc[] = {
+    { 8, 0, 257, 100000 }
+};
+
+static int migration_cc_reset_test_one(int new_ip)
+{
+    uint64_t simulated_time = 0;
+    uint64_t loss_mask = 0;
+    uint64_t cwin_before = 0;
+    uint64_t rtt_min_before = 0;
+    uint64_t cwin_at_switch = 0;
+    uint64_t cwin_min_after = UINT64_MAX;
+    uint64_t srtt_at_switch = 0;
+    int switched = 0;
+    int nb_trials = 0;
+    int nb_inactive = 0;
+    picoquic_test_tls_api_ctx_t* test_ctx = NULL;
+    picoquic_connection_id_t initial_cid = { {0x19, 0xcc, (uint8_t)new_ip, 0, 0, 0, 0, 0}, 8 };
+    int ret = tls_api_init_ctx_ex2(&test_ctx, PICOQUIC_INTERNAL_TEST_VERSION_1,
+        PICOQUIC_TEST_SNI, PICOQUIC_TEST_ALPN, &simulated_time, NULL, NULL, 0, 0, 0, &initial_cid, 8, 0, 0, 0);
+
+    if (ret == 0 && test_ctx == NULL) {
+        ret = PICOQUIC_ERROR_MEMORY;
+    }
+    if (ret == 0) {
+        ret = tls_api_connection_loop(test_ctx, &loss_mask, 0, &simulated_time);
+    }
+    if (ret == 0) {
+        ret = test_api_init_send_recv_scenario(test_ctx, test_scenario_very_long, sizeof(test_scenario_very_long));
+    }
+    if (ret == 0) {
+        ret = tls_api_data_sending_loop(test_ctx, &loss_mask, &simulated_time, 0);
+    }
+    if (ret == 0) {
+        ret = tls_api_one_scenario_verify(test_ctx);
+    }
+    if (ret == 0) {
+        ret = tls_api_synch_to_empty_loop(test_ctx, &simulated_time, 2048, PICOQUIC_NB_PATH_TARGET, 1);
+    }
+    if (ret == 0) {
+        cwin_before = test_ctx->cnx_server->path[0]->cwin;
+        rtt_min_before = test_ctx->cnx_server->path[0]->rtt_min;
+        if (cwin_before < 4 * PICOQUIC_CWIN_INITIAL) {
+            DBG_PRINTF("Server window %" PRIu64 " did not grow, nothing to test", cwin_before);
+            ret = -1;
+        }
+    }
+    if (ret == 0) {
+        test_ctx->client_addr_natted = test_ctx->client_addr;
+        if (new_ip) {
+            ((uint8_t*)&test_ctx->client_addr_natted.sin_addr)[3] ^= 0x10;
+        }
+        else {
+            test_ctx->client_addr_natted.sin_port += 17;
+        }
+        test_ctx->client_use_nat = 1;
+        test_ctx->c_to_s_link->microsec_latency = 50000;
+        test_ctx->s_to_c_link->microsec_latency = 50000;
+        for (size_t i = 0; i < test_ctx->nb_test_streams; i++) {
+            test_api_delete_test_stream(&test_ctx->test_stream[i]);
+        }
+        ret = test_api_init_send_recv_scenario(test_ctx, test_scenario_migration_cc, sizeof(test_scenario_migration_cc));
+    }
+    /* The data loop, noting the server's state when it switches to the new address */
+    while (ret == 0 && nb_trials < 100000 && nb_inactive < 256 && TEST_CLIENT_READY && TEST_SERVER_READY) {
+        int was_active = 0;
+
+        nb_trials++;
+        ret = tls_api_one_sim_round(test_ctx, &simulated_time, 0, &was_active);
+        nb_inactive = (was_active) ? 0 : nb_inactive + 1;
+        if (!switched && picoquic_compare_addr((struct sockaddr*)&test_ctx->cnx_server->path[0]->first_tuple->peer_addr,
+            (struct sockaddr*)&test_ctx->client_addr_natted) == 0) {
+            switched = 1;
+            cwin_at_switch = test_ctx->cnx_server->path[0]->cwin;
+            srtt_at_switch = test_ctx->cnx_server->path[0]->smoothed_rtt;
+        }
+        if (switched && test_ctx->cnx_server->path[0]->cwin < cwin_min_after) {
+            cwin_min_after = test_ctx->cnx_server->path[0]->cwin;
+        }
+        if (test_ctx->test_finished && picoquic_is_cnx_backlog_empty(test_ctx->cnx_client) &&
+            picoquic_is_cnx_backlog_empty(test_ctx->cnx_server)) {
+            break;
+        }
+    }
+    if (ret == 0) {
+        ret = tls_api_one_scenario_verify(test_ctx);
+    }
+    if (ret == 0) {
+        picoquic_path_t* path_x = test_ctx->cnx_server->path[0];
+
+        if (!switched) {
+            DBG_PRINTF("%s", "The server did not switch to the new address");
+            ret = -1;
+        }
+        else if (new_ip && (cwin_at_switch > 2 * PICOQUIC_CWIN_INITIAL || srtt_at_switch >= PICOQUIC_INITIAL_RTT ||
+            srtt_at_switch < 100000 || path_x->rtt_min < 100000)) {
+            /* Reset: initial window, the challenge round trip (100 ms) as first sample, min RTT of the new path */
+            DBG_PRINTF("New IP, not reset: cwin %" PRIu64 " (before %" PRIu64 "), srtt %" PRIu64 ", rtt_min %" PRIu64 " (before %" PRIu64 ")",
+                cwin_at_switch, cwin_before, srtt_at_switch, path_x->rtt_min, rtt_min_before);
+            ret = -1;
+        }
+        else if (new_ip && cwin_min_after < PICOQUIC_CWIN_INITIAL) {
+            DBG_PRINTF("New IP: window down to %" PRIu64 " after the reset, losses on the old path counted", cwin_min_after);
+            ret = -1;
+        }
+        else if (!new_ip && path_x->rtt_min != rtt_min_before) {
+            DBG_PRINTF("New port, RTT state not kept: rtt_min %" PRIu64 " (before %" PRIu64 ")", path_x->rtt_min, rtt_min_before);
+            ret = -1;
+        }
+    }
+    if (test_ctx != NULL) {
+        tls_api_delete_ctx(test_ctx);
+    }
+
+    return ret;
+}
+
+int migration_cc_reset_test(void)
+{
+    return migration_cc_reset_test_one(1);
+}
+
+int nat_rebinding_cc_kept_test(void)
+{
+    return migration_cc_reset_test_one(0);
+}
+
 
 /*
 * Fast NAT Rebinding test. The client is unaware of the migration,

@@ -2695,19 +2695,22 @@ picoquic_packet_t* picoquic_check_spurious_retransmission(picoquic_cnx_t* cnx,
                     old_path->max_reorder_gap = reorder_gap;
                 }
 
-                if (old_path->total_bytes_lost > p->length) {
-                    old_path->total_bytes_lost -= p->length;
-                }
-                else {
-                    old_path->total_bytes_lost = 0;
-                }
+                if (!PICOQUIC_IS_SENT_BEFORE_CC_RESET(p)) {
+                    /* else its loss was not counted either */
+                    if (old_path->total_bytes_lost > p->length) {
+                        old_path->total_bytes_lost -= p->length;
+                    }
+                    else {
+                        old_path->total_bytes_lost = 0;
+                    }
 
-                if (cnx->congestion_alg != NULL) {
-                    picoquic_per_ack_state_t ack_state = { 0 };
-                    ack_state.pc = pc;
-                    ack_state.lost_packet_number = p->sequence_number;
-                    cnx->congestion_alg->alg_notify(cnx, old_path, picoquic_congestion_notification_spurious_repeat,
-                       &ack_state, current_time);
+                    if (cnx->congestion_alg != NULL) {
+                        picoquic_per_ack_state_t ack_state = { 0 };
+                        ack_state.pc = pc;
+                        ack_state.lost_packet_number = p->sequence_number;
+                        cnx->congestion_alg->alg_notify(cnx, old_path, picoquic_congestion_notification_spurious_repeat,
+                            &ack_state, current_time);
+                    }
                 }
             }
 
@@ -3037,7 +3040,7 @@ void picoquic_record_ack_packet_data(picoquic_packet_data_t* packet_data, picoqu
 {
     picoquic_path_t* old_path = acked_packet->send_path;
 
-    if (old_path != NULL) {
+    if (old_path != NULL && !PICOQUIC_IS_SENT_BEFORE_CC_RESET(acked_packet)) {
         int is_path_limited = picoquic_is_ack_path_limited(old_path, acked_packet);
 
         /* Find the path index in the packet data structure */
@@ -3084,6 +3087,11 @@ void process_decoded_packet_data(picoquic_cnx_t* cnx, picoquic_path_t * path_x,
         uint64_t lost_before_ack = path_x->total_bytes_lost;
         uint64_t loss_ranges_before_ack = packet_data->path_ack[i].acked_path->nb_loss_ranges_found;
         uint64_t nb_bytes_newly_lost = 0;
+
+        if (packet_data->path_ack[i].largest_sent_time < packet_data->path_ack[i].acked_path->cc_reset_time) {
+            /* Recorded before a PATH_RESPONSE in the same packet moved the path to a new address */
+            continue;
+        }
 
         picoquic_update_path_rtt(cnx, packet_data->path_ack[i].acked_path, epoch,
             packet_data->path_ack[i].largest_sent_time, current_time, packet_data->last_ack_delay,
@@ -3792,7 +3800,9 @@ static int picoquic_process_ack_range(
                 }
 
                 if (old_path != NULL) {
-                    old_path->delivered += p->length;
+                    if (!PICOQUIC_IS_SENT_BEFORE_CC_RESET(p)) {
+                        old_path->delivered += p->length;
+                    }
                     /* Reset the flags tracking loss of ack only packets and corresponding ping */
                     old_path->is_ack_lost = 0;
                     old_path->is_ack_expected = 0;
@@ -4938,6 +4948,16 @@ uint8_t * picoquic_format_path_response_frame(uint8_t* bytes, uint8_t* bytes_max
     return bytes;
 }
 
+/* RFC 9000 9.4: a path whose address changed keeps its congestion control and RTT state only if
+ * the change is a port number (NAT rebinding). A local address counts only if both are known.
+ */
+static int picoquic_tuple_ip_changed(const picoquic_tuple_t* old_tuple, const picoquic_tuple_t* new_tuple)
+{
+    return picoquic_compare_ip_addr((const struct sockaddr*)&old_tuple->peer_addr, (const struct sockaddr*)&new_tuple->peer_addr) != 0 ||
+        (old_tuple->local_addr.ss_family != AF_UNSPEC && new_tuple->local_addr.ss_family != AF_UNSPEC &&
+            picoquic_compare_ip_addr((const struct sockaddr*)&old_tuple->local_addr, (const struct sockaddr*)&new_tuple->local_addr) != 0);
+}
+
 const uint8_t* picoquic_decode_path_response_frame(picoquic_cnx_t* cnx, const uint8_t* bytes, const uint8_t* bytes_max,
     picoquic_path_t * path_x, uint64_t current_time)
 {
@@ -4968,6 +4988,20 @@ const uint8_t* picoquic_decode_path_response_frame(picoquic_cnx_t* cnx, const ui
 
             if (found_challenge && !tuple->challenge_verified) {
                 tuple->challenge_verified = 1;
+                if (previous_tuple != NULL && picoquic_tuple_ip_changed(path_x->first_tuple, tuple)) {
+                    /* The tuple replaces the current one below, and it is a new path (RFC 9000 9.4):
+                     * the congestion controller and the RTT estimator restart, and the packets in
+                     * flight, sent on the old path, no longer count for this one. Done before the
+                     * challenge sample, which becomes the first RTT sample of the new path. */
+                    path_x->cc_reset_time = current_time;
+                    path_x->bytes_in_transit = 0;
+                    picoquic_init_path_rtt(path_x);
+                    if (cnx->congestion_alg != NULL) {
+                        picoquic_per_ack_state_t ack_state = { 0 };
+                        cnx->congestion_alg->alg_notify(cnx, path_x, picoquic_congestion_notification_reset, &ack_state, current_time);
+                    }
+                    picoquic_log_app_message(cnx, "Path %" PRIu64 " moved to a new address, congestion control and RTT reset", path_x->unique_path_id);
+                }
                 /* Provide a qualified time estimate from challenge time */
                 picoquic_update_path_rtt(cnx, path_x, -1, tuple->challenge_time_first, current_time, 0, 0);
                 /* This challenge is verified. 

@@ -87,6 +87,22 @@ uint64_t picoquic_current_retransmit_timer(picoquic_cnx_t* cnx, picoquic_path_t 
     return rto;
 }
 
+/* Initial values of the RTT estimator (RFC 9002 A.3): for a new path, and for a path that
+ * moved to a new address (RFC 9000 9.4). The next sample is then treated as the first one.
+ */
+void picoquic_init_path_rtt(picoquic_path_t* path_x)
+{
+    path_x->smoothed_rtt = PICOQUIC_INITIAL_RTT;
+    path_x->rtt_variant = 0;
+    path_x->retransmit_timer = PICOQUIC_INITIAL_RETRANSMIT_TIMER;
+    path_x->rtt_min = 0;
+    path_x->rtt_max = 0;
+    path_x->rtt_sample = 0;
+    path_x->rtt_is_initialized = 0;
+    path_x->nb_rtt_estimate_in_period = 0;
+    path_x->sum_rtt_estimate_in_period = 0;
+}
+
 /* The BDP seed is validated upon receiving the first RTT measurement */
 static void picoquic_validate_bdp_seed(picoquic_cnx_t* cnx, picoquic_path_t* path_x, uint64_t rtt_sample, uint64_t current_time)
 {
