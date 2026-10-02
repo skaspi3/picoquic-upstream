@@ -5098,7 +5098,17 @@ void picoquic_set_default_congestion_algorithm(picoquic_quic_t* quic, picoquic_c
 
 void picoquic_set_default_congestion_algorithm_by_name(picoquic_quic_t* quic, char const * alg_name)
 {
-    picoquic_set_default_congestion_algorithm_ex(quic, picoquic_get_congestion_algorithm(alg_name), NULL);
+    picoquic_congestion_algorithm_t const* alg = picoquic_get_congestion_algorithm(alg_name);
+
+    if (alg == NULL) {
+        /* Unknown name, or no algorithm registered: a NULL default would run new
+         * connections without any congestion control. Keep the current default. */
+        DBG_PRINTF("Congestion algorithm %s not registered, default unchanged\n",
+            (alg_name == NULL) ? "(null)" : alg_name);
+    }
+    else {
+        picoquic_set_default_congestion_algorithm_ex(quic, alg, NULL);
+    }
 }
 
 /*
