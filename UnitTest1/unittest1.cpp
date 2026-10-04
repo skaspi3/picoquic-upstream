@@ -1937,6 +1937,13 @@ namespace UnitTest1
             Assert::AreEqual(ret, 0);
         }
 
+        TEST_METHOD(challenge_loss_cc)
+        {
+            int ret = challenge_loss_cc_test();
+
+            Assert::AreEqual(ret, 0);
+        }
+
         TEST_METHOD(spinbit)
         {
             int ret = spinbit_test();
