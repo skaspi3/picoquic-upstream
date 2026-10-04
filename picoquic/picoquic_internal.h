@@ -366,7 +366,7 @@ typedef struct st_picoquic_packet_t {
     unsigned int is_ack_eliciting : 1;
     unsigned int is_mtu_probe : 1;
     unsigned int is_multipath_probe : 1;
-    unsigned int is_tuple_probe : 1; /* path control packet sent to a tuple other than the first one */
+    unsigned int is_tuple_probe : 1; /* sent to a tuple other than the first one, or to an address not validated yet */
     unsigned int is_ack_trap : 1;
     unsigned int delivered_app_limited : 1;
     unsigned int sent_cwin_limited : 1;
@@ -1017,6 +1017,10 @@ typedef struct st_picoquic_tuple_t {
     uint64_t demotion_time;
     uint64_t challenge_time_first;
     uint64_t is_nat_rebinding;
+    /* Bytes received from and sent to this address, for the anti-amplification limit
+     * while the server sends to it before it is validated (RFC 9000, sections 8 and 9.3.1). */
+    uint64_t bytes_received;
+    uint64_t bytes_sent;
     uint8_t challenge_repeat_count;
     /* Flags */
     unsigned int is_backup;
@@ -1025,6 +1029,9 @@ typedef struct st_picoquic_tuple_t {
     unsigned int challenge_failed : 1;
     unsigned int response_required : 1;
     unsigned int to_preferred_address : 1;
+    unsigned int is_promoted_unverified : 1; /* first tuple of a server path before its validation completes */
+    unsigned int is_validated_before : 1; /* promoted while its check runs, but validated before: no amplification limit */
+    unsigned int is_revalidation_only : 1; /* previously active address checked again: its answer does not make it first */
 } picoquic_tuple_t;
 
 /*
@@ -1650,6 +1657,9 @@ int picoquic_check_cid_for_new_tuple(picoquic_cnx_t* cnx, uint64_t unique_path_i
 int picoquic_assign_peer_cnxid_to_tuple(picoquic_cnx_t* cnx, picoquic_path_t* path_x, picoquic_tuple_t* tuple);
 //int picoquic_assign_peer_cnxid_to_path(picoquic_cnx_t* cnx, int path_id);
 void picoquic_reset_path_mtu(picoquic_path_t* path_x);
+void picoquic_follow_peer_address(picoquic_cnx_t* cnx, picoquic_path_t* path_x,
+    const struct sockaddr* addr_from, const struct sockaddr* addr_to, uint64_t current_time);
+int picoquic_tuple_is_sending_allowed(const picoquic_path_t* path_x, const picoquic_tuple_t* tuple);
 int picoquic_get_path_id_from_unique(picoquic_cnx_t* cnx, uint64_t unique_path_id);
 
 picoquic_remote_cnxid_stash_t* picoquic_find_or_create_remote_cnxid_stash(picoquic_cnx_t* cnx, uint64_t unique_path_id, int do_create);

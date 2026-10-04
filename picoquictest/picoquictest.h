@@ -579,6 +579,7 @@ int limited_safe_test(void);
 int fast_nat_rebinding_test(void);
 int challenge_loss_cc_test(void);
 int tuple_failure_wake_test(void);
+int nat_rebinding_follow_test(void);
 int datagram_test(void);
 int datagram_rt_test(void);
 int datagram_rt_skip_test(void);

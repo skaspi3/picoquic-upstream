@@ -4943,6 +4943,95 @@ uint8_t * picoquic_format_path_response_frame(uint8_t* bytes, uint8_t* bytes_max
     return bytes;
 }
 
+/* Data goes to a validated address, to one validated before while its check runs again,
+ * or to a new one the server moved to before validating it, within 3 times the bytes
+ * received from it (RFC 9000, sections 8 and 9.3.1). */
+int picoquic_tuple_is_sending_allowed(const picoquic_path_t* path_x, const picoquic_tuple_t* tuple)
+{
+    return tuple->challenge_verified ||
+        (tuple->is_promoted_unverified && !tuple->challenge_failed &&
+            (tuple->is_validated_before || tuple->bytes_sent + path_x->send_mtu <= 3 * tuple->bytes_received));
+}
+
+/* Whether the packet came from this tuple. A local address unknown on either side matches. */
+static int picoquic_tuple_has_addresses(const picoquic_tuple_t* tuple, const struct sockaddr* addr_from, const struct sockaddr* addr_to)
+{
+    return picoquic_compare_addr(addr_from, (const struct sockaddr*)&tuple->peer_addr) == 0 &&
+        (addr_to == NULL || addr_to->sa_family == AF_UNSPEC || tuple->local_addr.ss_family == AF_UNSPEC ||
+            picoquic_compare_addr(addr_to, (const struct sockaddr*)&tuple->local_addr) == 0);
+}
+
+/* RFC 9000, section 9.3: "Receiving a packet from a new peer address containing a non-probing
+ * frame indicates that the peer has migrated to that address." A server on a single path sends
+ * there from now on, and validates the previously active address again (section 9.3.3).
+ * Called for the highest-numbered non-probing packet only, so that packets reordered from an
+ * older address do not move it back. With multipath, picoquic_find_incoming_path promotes
+ * the new tuple by itself.
+ */
+void picoquic_follow_peer_address(picoquic_cnx_t* cnx, picoquic_path_t* path_x,
+    const struct sockaddr* addr_from, const struct sockaddr* addr_to, uint64_t current_time)
+{
+    picoquic_tuple_t* tuple;
+    picoquic_tuple_t* previous_tuple = NULL;
+    picoquic_tuple_t* old_tuple;
+
+    if (cnx->client_mode || cnx->is_multipath_enabled || addr_from == NULL || path_x == NULL || path_x->first_tuple == NULL) {
+        return;
+    }
+    tuple = path_x->first_tuple;
+    while (tuple != NULL && !picoquic_tuple_has_addresses(tuple, addr_from, addr_to)) {
+        previous_tuple = tuple;
+        tuple = tuple->next_tuple;
+    }
+    if (tuple == NULL || previous_tuple == NULL || tuple->challenge_failed) {
+        /* Unknown address, already the first tuple, or an address that failed its validation */
+        return;
+    }
+    old_tuple = path_x->first_tuple;
+    previous_tuple->next_tuple = tuple->next_tuple;
+    tuple->next_tuple = old_tuple;
+    path_x->first_tuple = tuple;
+    picoquic_reset_path_mtu(path_x);
+
+    if (tuple->challenge_verified || tuple->is_revalidation_only) {
+        /* Validated before: an address that the client probed before moving to it (section 9.2),
+         * or the previous address coming back. The validation of an address seen recently may be
+         * skipped (section 9.3), so data goes there at once; a new check runs, so that an address
+         * that stopped answering is abandoned all the same. */
+        if (tuple->challenge_verified) {
+            picoquic_set_tuple_challenge(tuple, current_time, cnx->quic->use_constant_challenges);
+            tuple->challenge_required = 1;
+            tuple->challenge_verified = 0;
+        }
+        tuple->is_validated_before = 1;
+    }
+    else {
+        /* Never validated: data goes there within the anti-amplification limit until it is */
+        if (!tuple->challenge_required) {
+            picoquic_set_tuple_challenge(tuple, current_time, cnx->quic->use_constant_challenges);
+            tuple->challenge_required = 1;
+        }
+        tuple->is_validated_before = 0;
+    }
+    tuple->is_promoted_unverified = 1;
+    tuple->is_revalidation_only = 0;
+    /* The address the connection leaves, if it was validated, is checked again. When it
+     * answers, it is only validated: packets go back there only if non-probing packets
+     * come from it again. */
+    if ((old_tuple->challenge_verified || old_tuple->is_validated_before) && !old_tuple->challenge_failed) {
+        old_tuple->is_revalidation_only = 1;
+        if (old_tuple->challenge_verified) {
+            picoquic_set_tuple_challenge(old_tuple, current_time, cnx->quic->use_constant_challenges);
+            old_tuple->challenge_required = 1;
+            old_tuple->challenge_verified = 0;
+        }
+    }
+    old_tuple->is_promoted_unverified = 0;
+    old_tuple->is_validated_before = 0;
+    picoquic_log_app_message(cnx, "Path %" PRIu64 ": peer address changed, sending to the new address %s",
+        path_x->unique_path_id, tuple->is_validated_before ? "validated before" : "while validating it");
+}
+
 const uint8_t* picoquic_decode_path_response_frame(picoquic_cnx_t* cnx, const uint8_t* bytes, const uint8_t* bytes_max,
     picoquic_path_t * path_x, uint64_t current_time)
 {
@@ -4973,22 +5062,38 @@ const uint8_t* picoquic_decode_path_response_frame(picoquic_cnx_t* cnx, const ui
 
             if (found_challenge && !tuple->challenge_verified) {
                 tuple->challenge_verified = 1;
-                /* Provide a qualified time estimate from challenge time */
-                picoquic_update_path_rtt(cnx, path_x, -1, tuple->challenge_time_first, current_time, 0, 0);
-                /* This challenge is verified. 
-                * If this is a client, the path should replace the current path.
-                * If this is a server, the replacement should happen if we have a NAT, maybe,
-                * or if qualifying data is received, which will happen later.
-                */
-                if (previous_tuple != NULL /* && cnx->client_mode */) {
-                    previous_tuple->next_tuple = tuple->next_tuple;
-                    tuple->next_tuple = path_x->first_tuple;
-                    path_x->first_tuple = tuple;
-                    if (tuple->to_preferred_address) {
-                        cnx->remote_parameters.migration_disabled = 0;
-                        picoquic_log_app_message(cnx, "Migration to server preferred address successful on path %" PRIu64, path_x->unique_path_id);
+                if (tuple->is_revalidation_only) {
+                    /* The previously active address answered (RFC 9000, section 9.3.3). It is
+                     * validated again, but packets keep going where the latest non-probing
+                     * packets come from. */
+                    tuple->is_revalidation_only = 0;
+                    picoquic_log_app_message(cnx, "Path %" PRIu64 ": previous peer address validated again", path_x->unique_path_id);
+                }
+                else if (previous_tuple != NULL && !cnx->client_mode && !cnx->is_multipath_enabled) {
+                    /* A server on a single path moves only on non-probing packets
+                     * (picoquic_follow_peer_address, RFC 9000, section 9.3): an address that
+                     * the peer only probed is validated, nothing more. */
+                }
+                else {
+                    tuple->is_promoted_unverified = 0;
+                    tuple->is_validated_before = 0;
+                    /* Provide a qualified time estimate from challenge time */
+                    picoquic_update_path_rtt(cnx, path_x, -1, tuple->challenge_time_first, current_time, 0, 0);
+                    /* This challenge is verified.
+                    * If this is a client, the path should replace the current path.
+                    * If this is a server, the replacement should happen if we have a NAT, maybe,
+                    * or if qualifying data is received, which will happen later.
+                    */
+                    if (previous_tuple != NULL /* && cnx->client_mode */) {
+                        previous_tuple->next_tuple = tuple->next_tuple;
+                        tuple->next_tuple = path_x->first_tuple;
+                        path_x->first_tuple = tuple;
+                        if (tuple->to_preferred_address) {
+                            cnx->remote_parameters.migration_disabled = 0;
+                            picoquic_log_app_message(cnx, "Migration to server preferred address successful on path %" PRIu64, path_x->unique_path_id);
+                        }
+                        picoquic_reset_path_mtu(path_x);
                     }
-                    picoquic_reset_path_mtu(path_x);
                 }
                 if (cnx->are_path_callbacks_enabled && cnx->callback_fn != NULL &&
                     cnx->callback_fn(cnx, path_x->unique_path_id, NULL, 0, picoquic_callback_path_available,
@@ -6837,6 +6942,8 @@ int picoquic_decode_frames(picoquic_cnx_t* cnx, picoquic_path_t * path_x, const 
         }
 
         if (epoch == picoquic_epoch_1rtt && !is_path_probing_packet && pn64 > path_x->last_non_path_probing_pn) {
+            /* RFC 9000, section 9.3: the highest-numbered non-probing packet decides where packets go */
+            picoquic_follow_peer_address(cnx, path_x, addr_from, addr_to, current_time);
             path_x->last_non_path_probing_pn = pn64;
         }
     }

@@ -7040,6 +7040,109 @@ int tuple_failure_wake_test(void)
     return ret;
 }
 
+/* NAT rebinding in the middle of a download (RFC 9000, section 9.3): the server sends to the
+ * new client address as soon as non-probing packets come from it, before that address is
+ * validated and within the anti-amplification limit, and it checks the previous address again.
+ */
+int nat_rebinding_follow_test(void)
+{
+    uint64_t simulated_time = 0;
+    uint64_t loss_mask = 0;
+    uint64_t time_out;
+    int followed_unverified = 0;
+    int old_rechecked = 0;
+    picoquic_test_tls_api_ctx_t* test_ctx = NULL;
+    int ret = tls_api_init_ctx(&test_ctx, PICOQUIC_INTERNAL_TEST_VERSION_1,
+        PICOQUIC_TEST_SNI, PICOQUIC_TEST_ALPN, &simulated_time, NULL, NULL, 0, 0, 0);
+
+    if (ret == 0 && test_ctx == NULL) {
+        ret = PICOQUIC_ERROR_MEMORY;
+    }
+
+    if (ret == 0) {
+        test_ctx->c_to_s_link->microsec_latency = 50000;
+        test_ctx->s_to_c_link->microsec_latency = 50000;
+        ret = tls_api_connection_loop(test_ctx, &loss_mask, 0, &simulated_time);
+    }
+
+    if (ret == 0) {
+        ret = test_api_init_send_recv_scenario(test_ctx, test_scenario_very_long, sizeof(test_scenario_very_long));
+    }
+
+    while (ret == 0 && test_ctx->cnx_server->data_sent < 200000 && simulated_time < 10000000) {
+        int was_active = 0;
+        ret = tls_api_one_sim_round(test_ctx, &simulated_time, 0, &was_active);
+    }
+
+    if (ret == 0) {
+        /* The client's NAT gives it a new port */
+        test_ctx->client_addr_natted = test_ctx->client_addr;
+        test_ctx->client_addr_natted.sin_port += 17;
+        test_ctx->client_use_nat = 1;
+    }
+
+    /* Watch the server until the new address is validated */
+    time_out = simulated_time + 2000000;
+    while (ret == 0 && simulated_time < time_out) {
+        int was_active = 0;
+        picoquic_tuple_t* first_tuple;
+
+        ret = tls_api_one_sim_round(test_ctx, &simulated_time, time_out, &was_active);
+        first_tuple = test_ctx->cnx_server->path[0]->first_tuple;
+        if (ret != 0 || picoquic_compare_addr((struct sockaddr*)&first_tuple->peer_addr,
+            (struct sockaddr*)&test_ctx->client_addr_natted) != 0) {
+            continue;
+        }
+        if (first_tuple->challenge_verified) {
+            break;
+        }
+        followed_unverified = 1;
+        if (first_tuple->bytes_sent > 3 * first_tuple->bytes_received) {
+            DBG_PRINTF("Sent %" PRIu64 " bytes to the new address before validation, received %" PRIu64,
+                first_tuple->bytes_sent, first_tuple->bytes_received);
+            ret = -1;
+        }
+        if (first_tuple->next_tuple != NULL && first_tuple->next_tuple->is_revalidation_only &&
+            first_tuple->next_tuple->challenge_required) {
+            old_rechecked = 1;
+        }
+    }
+
+    if (ret == 0 && !followed_unverified) {
+        DBG_PRINTF("%s", "The server did not send to the new address before validating it");
+        ret = -1;
+    }
+
+    if (ret == 0 && !old_rechecked) {
+        DBG_PRINTF("%s", "The server did not check the previous address again");
+        ret = -1;
+    }
+
+    if (ret == 0) {
+        ret = tls_api_data_sending_loop(test_ctx, &loss_mask, &simulated_time, 0);
+    }
+
+    if (ret == 0) {
+        ret = tls_api_one_scenario_verify(test_ctx);
+    }
+
+    if (ret == 0) {
+        picoquic_tuple_t* first_tuple = test_ctx->cnx_server->path[0]->first_tuple;
+        if (picoquic_compare_addr((struct sockaddr*)&first_tuple->peer_addr,
+            (struct sockaddr*)&test_ctx->client_addr_natted) != 0 || !first_tuple->challenge_verified) {
+            DBG_PRINTF("%s", "The download did not end on the new address, validated");
+            ret = -1;
+        }
+    }
+
+    if (test_ctx != NULL) {
+        tls_api_delete_ctx(test_ctx);
+        test_ctx = NULL;
+    }
+
+    return ret;
+}
+
 /*
  * Test whether the loss bit reporting can be enabled without breaking the connection
  */

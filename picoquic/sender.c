@@ -868,6 +868,11 @@ void picoquic_finalize_and_protect_packet_tuple(picoquic_cnx_t* cnx,
 
     if (ret == 0 && length > 0) {
         packet->length = length;
+        if (tuple != NULL && tuple->is_promoted_unverified && !tuple->is_validated_before) {
+            /* Sent to an address not validated yet, maybe spoofed: like a probe, its loss
+             * says nothing about congestion on the path. */
+            packet->is_tuple_probe = 1;
+        }
         
         if (packet->ptype == picoquic_packet_1rtt_protected && cnx->is_multipath_enabled) {
             packet->sequence_number = path_x->pkt_ctx.send_sequence++;
@@ -2556,7 +2561,7 @@ int picoquic_prepare_packet_almost_ready(picoquic_cnx_t* cnx, picoquic_path_t* p
 
         length = bytes_next - bytes;
 
-        if (cnx->cnx_state != picoquic_state_disconnected && path_x->first_tuple->challenge_verified != 0) {
+        if (cnx->cnx_state != picoquic_state_disconnected && picoquic_tuple_is_sending_allowed(path_x, path_x->first_tuple)) {
             /* There are no frames yet that would be exempt from pacing control, but if there
              * was they should be sent here. */
 
@@ -2957,7 +2962,9 @@ int picoquic_prepare_packet_ready(picoquic_cnx_t* cnx, picoquic_path_t* path_x, 
      * are queued in the connection context as `cnx->data_repeat_first` when data 
      * frames need to be repeated, and under `cnx->first_misc_frame` when other
      * individual frames need repetition. */
-    if (cnx->first_misc_frame == NULL && 
+    if (cnx->first_misc_frame == NULL &&
+        /* Repeats count against the amplification limit of an address not validated yet too */
+        (!path_x->first_tuple->is_promoted_unverified || picoquic_tuple_is_sending_allowed(path_x, path_x->first_tuple)) &&
         (length = picoquic_retransmit_needed(cnx, pc, path_x, current_time, next_wake_time, packet, 
         send_buffer_min_max, &header_length)) > 0) {
         /* Check whether it makes sense to add an ACK at the end of the retransmission */
@@ -3010,7 +3017,7 @@ int picoquic_prepare_packet_ready(picoquic_cnx_t* cnx, picoquic_path_t* path_x, 
             length++;
             length = picoquic_pad_to_target_length(bytes, length, (uint32_t)(send_buffer_min_max - checksum_overhead));
             bytes_next = bytes + length;
-        } else if (cnx->cnx_state != picoquic_state_disconnected && path_x->first_tuple->challenge_verified != 0) {
+        } else if (cnx->cnx_state != picoquic_state_disconnected && picoquic_tuple_is_sending_allowed(path_x, path_x->first_tuple)) {
             /* There are no frames yet that would be exempt from pacing control, but if there
              * was they should be sent here. */
 
@@ -3764,6 +3771,10 @@ int picoquic_prepare_packet_ex(picoquic_cnx_t* cnx,
                     cnx->max_mtu_sent = coalesced_packet_size;
                 }
                 cnx->nb_packets_sent++;
+                if (tuple != NULL) {
+                    /* Spent from the anti-amplification budget of an address not validated yet */
+                    tuple->bytes_sent += coalesced_packet_size;
+                }
                 /* if needed, log that the packet is sent */
                 if (p_addr_to != NULL && p_addr_from != NULL) {
                     picoquic_log_pdu(cnx, 0, current_time,
