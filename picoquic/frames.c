@@ -2663,7 +2663,9 @@ picoquic_packet_t* picoquic_check_spurious_retransmission(picoquic_cnx_t* cnx,
 
             /* Update congestion control and statistics */
             if (old_path != NULL) {
-                old_path->nb_spurious++;
+                if (!p->is_tuple_probe) {
+                    old_path->nb_spurious++;
+                }
                 /* If this was the
                  * packet that triggered a retransmit, reset the retransmit count */
                 if (p->sequence_number >= picoquic_get_ack_number(cnx, old_path, pc)) {
@@ -2695,14 +2697,17 @@ picoquic_packet_t* picoquic_check_spurious_retransmission(picoquic_cnx_t* cnx,
                     old_path->max_reorder_gap = reorder_gap;
                 }
 
-                if (old_path->total_bytes_lost > p->length) {
+                if (p->is_tuple_probe) {
+                    /* Its loss was not counted either */
+                }
+                else if (old_path->total_bytes_lost > p->length) {
                     old_path->total_bytes_lost -= p->length;
                 }
                 else {
                     old_path->total_bytes_lost = 0;
                 }
 
-                if (cnx->congestion_alg != NULL) {
+                if (cnx->congestion_alg != NULL && !p->is_tuple_probe) {
                     picoquic_per_ack_state_t ack_state = { 0 };
                     ack_state.pc = pc;
                     ack_state.lost_packet_number = p->sequence_number;

@@ -182,6 +182,7 @@ int picoquic_prepare_path_control_packet(picoquic_cnx_t* cnx, picoquic_path_t* p
     packet->sequence_number = pkt_ctx->send_sequence;
     packet->send_time = current_time;
     packet->send_path = path_x;
+    packet->is_tuple_probe = (tuple != path_x->first_tuple);
     bytes_next = bytes + length;
 
     /* If required, prepare challenge and response frames.

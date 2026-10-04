@@ -873,7 +873,7 @@ static picoquic_packet_t* picoquic_process_lost_packet(picoquic_cnx_t* cnx, pico
 static void picoquic_check_path_mtu_on_losses(
     picoquic_cnx_t* cnx, picoquic_packet_t* old_p, int timer_based_retransmit)
 {
-    if (old_p->send_path != NULL &&
+    if (old_p->send_path != NULL && !old_p->is_tuple_probe &&
         ((old_p->length + old_p->checksum_overhead) == old_p->send_path->send_mtu || timer_based_retransmit) &&
         cnx->cnx_state >= picoquic_state_ready) {
         old_p->send_path->nb_mtu_losses++;
@@ -904,7 +904,9 @@ static void picoquic_count_and_notify_loss(
         cnx->nb_retransmission_total++;
     }
 
-    if (old_p->send_path != NULL) {
+    /* A probe sent to another address of the path, such as a challenge to an address that
+     * does not answer, says nothing about congestion on the path (RFC 9000, section 9.4). */
+    if (old_p->send_path != NULL && !old_p->is_tuple_probe) {
         old_p->send_path->nb_losses_found++;
         if (timer_based_retransmit == 0) {
             if (old_p->send_path->nb_loss_ranges_found == 0 ||

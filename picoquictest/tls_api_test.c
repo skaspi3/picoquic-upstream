@@ -6882,6 +6882,80 @@ int fast_nat_rebinding_test(void)
     return ret;
 }
 
+/* During a download, an attacker forwards a copy of a client packet from another address,
+ * ahead of the original. The server challenges that address, which never answers. These
+ * challenges are lost, but nothing else is: the path must not count a loss, and the
+ * congestion controller must not react.
+ */
+int challenge_loss_cc_test(void)
+{
+    uint64_t simulated_time = 0;
+    uint64_t loss_mask = 0;
+    uint64_t losses_before = 0;
+    picoquic_test_tls_api_ctx_t* test_ctx = NULL;
+    int ret = tls_api_init_ctx(&test_ctx, PICOQUIC_INTERNAL_TEST_VERSION_1,
+        PICOQUIC_TEST_SNI, PICOQUIC_TEST_ALPN, &simulated_time, NULL, NULL, 0, 0, 0);
+
+    if (ret == 0 && test_ctx == NULL) {
+        ret = PICOQUIC_ERROR_MEMORY;
+    }
+
+    if (ret == 0) {
+        picoquic_set_default_congestion_algorithm(test_ctx->qserver, picoquic_newreno_algorithm);
+        ret = tls_api_connection_loop(test_ctx, &loss_mask, 0, &simulated_time);
+    }
+
+    if (ret == 0) {
+        ret = test_api_init_send_recv_scenario(test_ctx, test_scenario_very_long, sizeof(test_scenario_very_long));
+    }
+
+    /* Let the download run, until a client packet is in flight */
+    while (ret == 0 && (test_ctx->cnx_server->data_sent < 100000 || test_ctx->c_to_s_link->first_packet == NULL) &&
+        simulated_time < 10000000) {
+        int was_active = 0;
+        ret = tls_api_one_sim_round(test_ctx, &simulated_time, 0, &was_active);
+    }
+
+    if (ret == 0 && test_ctx->c_to_s_link->first_packet == NULL) {
+        DBG_PRINTF("%s", "No client packet to copy");
+        ret = -1;
+    }
+
+    if (ret == 0) {
+        /* The copy arrives first; the original is then dropped as a duplicate */
+        picoquictest_sim_packet_t* original = test_ctx->c_to_s_link->first_packet;
+        uint8_t copy[PICOQUIC_MAX_PACKET_SIZE];
+        struct sockaddr_in other_addr = test_ctx->client_addr;
+
+        other_addr.sin_port += 1234;
+        memcpy(copy, original->bytes, original->length);
+        losses_before = test_ctx->cnx_server->path[0]->nb_losses_found;
+        ret = picoquic_incoming_packet(test_ctx->qserver, copy, original->length,
+            (struct sockaddr*)&other_addr, (struct sockaddr*)&original->addr_to, 0, 0, simulated_time);
+    }
+
+    if (ret == 0) {
+        ret = tls_api_data_sending_loop(test_ctx, &loss_mask, &simulated_time, 0);
+    }
+
+    if (ret == 0) {
+        ret = tls_api_one_scenario_verify(test_ctx);
+    }
+
+    if (ret == 0 && test_ctx->cnx_server->path[0]->nb_losses_found != losses_before) {
+        DBG_PRINTF("%" PRIu64 " losses counted on the path, only challenges to the other address were lost",
+            test_ctx->cnx_server->path[0]->nb_losses_found - losses_before);
+        ret = -1;
+    }
+
+    if (test_ctx != NULL) {
+        tls_api_delete_ctx(test_ctx);
+        test_ctx = NULL;
+    }
+
+    return ret;
+}
+
 /*
  * Test whether the loss bit reporting can be enabled without breaking the connection
  */

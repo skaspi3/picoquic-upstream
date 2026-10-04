@@ -366,6 +366,7 @@ typedef struct st_picoquic_packet_t {
     unsigned int is_ack_eliciting : 1;
     unsigned int is_mtu_probe : 1;
     unsigned int is_multipath_probe : 1;
+    unsigned int is_tuple_probe : 1; /* path control packet sent to a tuple other than the first one */
     unsigned int is_ack_trap : 1;
     unsigned int delivered_app_limited : 1;
     unsigned int sent_cwin_limited : 1;
