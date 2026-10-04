@@ -1937,6 +1937,13 @@ namespace UnitTest1
             Assert::AreEqual(ret, 0);
         }
 
+        TEST_METHOD(tuple_failure_wake)
+        {
+            int ret = tuple_failure_wake_test();
+
+            Assert::AreEqual(ret, 0);
+        }
+
         TEST_METHOD(spinbit)
         {
             int ret = spinbit_test();

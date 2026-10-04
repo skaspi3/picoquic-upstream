@@ -6882,6 +6882,90 @@ int fast_nat_rebinding_test(void)
     return ret;
 }
 
+/* A path control packet is prepared for a tuple whose validation is on its last try, and
+ * that try timed out: the tuple fails and moves to the end of the list, and the packet
+ * carries nothing. The data waiting on the first tuple must be sent right after, not at
+ * the next timer.
+ */
+int tuple_failure_wake_test(void)
+{
+    uint64_t simulated_time = 0;
+    uint64_t loss_mask = 0;
+    picoquic_tuple_t* tuple = NULL;
+    picoquic_test_tls_api_ctx_t* test_ctx = NULL;
+    int ret = tls_api_init_ctx(&test_ctx, PICOQUIC_INTERNAL_TEST_VERSION_1,
+        PICOQUIC_TEST_SNI, PICOQUIC_TEST_ALPN, &simulated_time, NULL, NULL, 0, 0, 0);
+
+    if (ret == 0 && test_ctx == NULL) {
+        ret = PICOQUIC_ERROR_MEMORY;
+    }
+
+    if (ret == 0) {
+        ret = tls_api_connection_loop(test_ctx, &loss_mask, 0, &simulated_time);
+    }
+
+    if (ret == 0) {
+        ret = tls_api_synch_to_empty_loop(test_ctx, &simulated_time, 2048, PICOQUIC_NB_PATH_TARGET, 1);
+    }
+
+    if (ret == 0) {
+        /* A second client address on the server side, as after a spoofed packet. Its last
+         * challenge was sent long ago and got no answer. */
+        picoquic_path_t* path_x = test_ctx->cnx_server->path[0];
+        struct sockaddr_in other_addr = test_ctx->client_addr;
+
+        other_addr.sin_port += 1234;
+        simulated_time += 5000000;
+        tuple = picoquic_create_tuple(path_x, (struct sockaddr*)&path_x->first_tuple->local_addr,
+            (struct sockaddr*)&other_addr, 0);
+        if (tuple == NULL || picoquic_assign_peer_cnxid_to_tuple(test_ctx->cnx_server, path_x, tuple) != 0) {
+            DBG_PRINTF("%s", "Cannot create the second tuple");
+            ret = -1;
+        }
+        else {
+            picoquic_set_tuple_challenge(tuple, simulated_time, 0);
+            tuple->challenge_required = 1;
+            tuple->challenge_repeat_count = PICOQUIC_CHALLENGE_REPEAT_MAX;
+            tuple->challenge_time = simulated_time - 5000000;
+        }
+    }
+
+    if (ret == 0) {
+        /* Data to send on the first tuple */
+        uint8_t data[1000] = { 0 };
+        ret = picoquic_add_to_stream(test_ctx->cnx_server, 1, data, sizeof(data), 1);
+    }
+
+    if (ret == 0) {
+        uint8_t send_buffer[PICOQUIC_MAX_PACKET_SIZE];
+        size_t send_length = 0;
+        struct sockaddr_storage addr_to;
+        struct sockaddr_storage addr_from;
+        int if_index = 0;
+        uint64_t next_wake_time;
+
+        ret = picoquic_prepare_packet_ex(test_ctx->cnx_server, simulated_time, send_buffer, sizeof(send_buffer),
+            &send_length, &addr_to, &addr_from, &if_index, NULL);
+        next_wake_time = picoquic_get_next_wake_time(test_ctx->qserver, simulated_time);
+
+        if (ret == 0 && !tuple->challenge_failed) {
+            DBG_PRINTF("%s", "The validation of the second tuple did not fail");
+            ret = -1;
+        }
+        else if (ret == 0 && send_length == 0 && next_wake_time > simulated_time) {
+            DBG_PRINTF("Nothing sent, and the data waits %" PRIu64 " us", next_wake_time - simulated_time);
+            ret = -1;
+        }
+    }
+
+    if (test_ctx != NULL) {
+        tls_api_delete_ctx(test_ctx);
+        test_ctx = NULL;
+    }
+
+    return ret;
+}
+
 /*
  * Test whether the loss bit reporting can be enabled without breaking the connection
  */

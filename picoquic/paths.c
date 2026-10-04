@@ -119,6 +119,13 @@ uint8_t* picoquic_prepare_tuple_challenge_frames(picoquic_cnx_t* cnx, picoquic_p
                     previous_tuple->next_tuple = tuple;
                 }
                 tuple->next_tuple = NULL;
+                if (path_x->first_tuple != tuple) {
+                    /* Packets go to another tuple: run the sender again at once. A path
+                     * control packet that carries nothing would otherwise leave the data
+                     * waiting on that tuple until the next timer. */
+                    *next_wake_time = current_time;
+                    SET_LAST_WAKE(cnx->quic, PICOQUIC_SENDER);
+                }
             }
         }
     }
