@@ -6694,11 +6694,13 @@ int picoquic_decode_frames(picoquic_cnx_t* cnx, picoquic_path_t * path_x, const 
                 is_path_probing_frame = 1;
                 bytes = picoquic_decode_path_challenge_frame(cnx, bytes, bytes_max, 
                     (path_is_not_allocated)?NULL:path_x, addr_from, addr_to);
+                ack_needed = 1;
                 break;
             case picoquic_frame_type_path_response:
                 is_path_probing_frame = 1;
                 bytes = picoquic_decode_path_response_frame(cnx, bytes, bytes_max,
                     (path_is_not_allocated) ? NULL : path_x, current_time);
+                ack_needed = 1;
                 break;
             case picoquic_frame_type_crypto_hs:
                 bytes = picoquic_decode_crypto_hs_frame(cnx, bytes, bytes_max, received_data, epoch);

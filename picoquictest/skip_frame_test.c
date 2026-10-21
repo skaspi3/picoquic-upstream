@@ -1250,7 +1250,11 @@ int parse_frame_test(void)
                 DBG_PRINTF("Parse frame <%s> fails, ret = %d\n", test_skip_list[i].name, t_ret);
                 ret = t_ret;
             }
-            else if ((ack_needed != 0 && test_skip_list[i].is_pure_ack != 0) ||
+            else if ((ack_needed != 0 && test_skip_list[i].is_pure_ack != 0 &&
+                /* Path challenges and responses are acknowledged (RFC 9000, 13.2.1), but they are not
+                 * repeated as such, which is what is_pure_ack also tells the skip test. */
+                test_skip_list[i].val[0] != picoquic_frame_type_path_challenge &&
+                test_skip_list[i].val[0] != picoquic_frame_type_path_response) ||
                 (ack_needed == 0 && test_skip_list[i].is_pure_ack == 0)) {
                 DBG_PRINTF("Parse frame <%s> fails, ack needed: %d, expected pure ack: %d\n",
                     test_skip_list[i].name, ack_needed, (int)test_skip_list[i].is_pure_ack);
